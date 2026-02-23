@@ -1,3 +1,5 @@
+<img src="revgraph.png" alt="RevGraph" width="200" align="left">
+
 # RevGraph
 
 **Reverse Engineering Graph Intelligence SDK**
