@@ -4,6 +4,31 @@ from __future__ import annotations
 
 from revgraph.agents.base import BaseWorkflow
 
+_SYSTEM_PROMPT = (
+    "You are a firmware security analyst. Your task is to analyze a firmware "
+    "ecosystem by examining all loaded binaries, their shared libraries, "
+    "cross-binary dependencies, and shared functions.\n\n"
+    "Use the provided tools to:\n"
+    "1. List all loaded binaries (query_graph)\n"
+    "2. Examine each binary's imports and functions\n"
+    "3. Identify shared dependencies between binaries\n"
+    "4. Assess supply chain risks\n\n"
+    "Produce a report covering: architecture overview, shared dependencies, "
+    "potential supply chain risks, and hardening recommendations."
+)
+
+_TOOLS = [
+    "load_binary_info",
+    "query_graph",
+    "list_functions",
+    "get_function_details",
+    "get_function_imports",
+    "search_functions",
+    "search_strings",
+    "compute_bbr",
+    "get_dangerous_functions",
+]
+
 
 class FirmwareWorkflow(BaseWorkflow):
     name = "firmware"
@@ -13,68 +38,10 @@ class FirmwareWorkflow(BaseWorkflow):
     async def run(
         self, input_text: str, max_turns: int = 30, interactive: bool = False
     ) -> str:
-        """Analyze firmware ecosystem — shared libraries, dependencies, etc."""
-        from revgraph.graph.query_engine import QueryEngine
-        from revgraph.graph.cross_binary import find_shared_imports, find_shared_functions
-
-        engine = QueryEngine(self._driver)
-
-        # Step 1: List all loaded binaries
-        binaries = engine.execute(
-            "MATCH (b:BinaryFile) "
-            "OPTIONAL MATCH (b)-[:DEFINES]->(f:Function) "
-            "RETURN b.name AS name, b.sha256 AS sha256, "
-            "b.architecture AS arch, count(f) AS num_functions "
-            "ORDER BY b.name"
+        """Analyze firmware ecosystem via agentic tool loop."""
+        return self._run_agent(
+            system_prompt=_SYSTEM_PROMPT,
+            user_msg=input_text,
+            tool_names=_TOOLS,
+            max_iterations=max_turns,
         )
-
-        if len(binaries) < 2:
-            return "Firmware analysis requires at least 2 loaded binaries."
-
-        # Step 2: Cross-binary dependency analysis
-        dependency_map = []
-        sha_list = [b["sha256"] for b in binaries]
-
-        for i in range(len(sha_list)):
-            for j in range(i + 1, len(sha_list)):
-                shared = find_shared_imports(self._driver, sha_list[i], sha_list[j])
-                shared_funcs = find_shared_functions(self._driver, sha_list[i], sha_list[j])
-                if shared or shared_funcs:
-                    dependency_map.append(
-                        {
-                            "binary_a": binaries[i]["name"],
-                            "binary_b": binaries[j]["name"],
-                            "shared_imports": len(shared),
-                            "shared_functions": len(shared_funcs),
-                        }
-                    )
-
-        # Step 3: Generate ecosystem report
-        report_data = f"Firmware Ecosystem: {len(binaries)} binaries\n\n"
-        for b in binaries:
-            report_data += f"  - {b['name']} ({b['arch']}): {b['num_functions']} functions\n"
-
-        report_data += f"\nDependencies ({len(dependency_map)} pairs):\n"
-        for dep in dependency_map:
-            report_data += (
-                f"  {dep['binary_a']} <-> {dep['binary_b']}: "
-                f"{dep['shared_imports']} shared imports, "
-                f"{dep['shared_functions']} shared functions\n"
-            )
-
-        report = self._llm.complete(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a firmware security analyst. Analyze the firmware ecosystem "
-                        "and produce a report covering: architecture overview, shared dependencies, "
-                        "potential supply chain risks, and hardening recommendations."
-                    ),
-                },
-                {"role": "user", "content": report_data + "\n\n" + input_text},
-            ],
-            max_tokens=4096,
-        )
-
-        return report

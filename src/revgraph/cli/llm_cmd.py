@@ -97,7 +97,7 @@ def vuln_report(
 
 @llm_app.command(name="exploit-analyze")
 def exploit_analyze(
-    binary: str = typer.Argument(..., help="Path to ELF binary"),
+    binary: str = typer.Argument(..., help="Path to ELF binary or binary SHA256"),
     libc: Optional[str] = typer.Option(None, "--libc", help="Path to libc.so"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output JSON file"),
 ) -> None:
@@ -112,70 +112,93 @@ def exploit_analyze(
     ctx = get_context()
     llm = ctx.ensure_llm()
 
+    # Try agentic mode if graph is available and binary looks like a SHA256
+    sha256: str | None = None
+    registry = None
+    if len(binary) == 64 and all(c in "0123456789abcdef" for c in binary.lower()):
+        # Treat as SHA256 — try agentic mode
+        try:
+            driver = ctx.ensure_neo4j()
+            from revgraph.agents.registry import ToolRegistry
+
+            registry = ToolRegistry(driver, llm)
+            sha256 = binary
+        except Exception:
+            pass  # Fall through to stuffed mode
+
     binary_path = Path(binary)
-    if not binary_path.exists():
+    if sha256 is None and not binary_path.exists():
         console.print(f"[red]Binary not found: {binary}[/red]")
         raise typer.Exit(1)
 
     # Gather binary metadata
-    file_out = subprocess.run(
-        ["file", str(binary_path)], capture_output=True, text=True
-    ).stdout.strip()
-
-    checksec_out = ""
-    try:
-        checksec_out = subprocess.run(
-            ["checksec", "--file", str(binary_path)],
-            capture_output=True, text=True,
+    if sha256 and registry:
+        # Agentic mode — model will fetch data via tools
+        file_out = ""
+        checksec_out = ""
+        disassembly = ""
+        strings_list: list[str] = []
+        arch = "unknown"
+        libc_version = "unknown"
+    else:
+        file_out = subprocess.run(
+            ["file", str(binary_path)], capture_output=True, text=True
         ).stdout.strip()
-    except FileNotFoundError:
-        checksec_out = "checksec not available"
 
-    # Get disassembly of user-defined functions
-    objdump = subprocess.run(
-        ["objdump", "-d", str(binary_path)], capture_output=True, text=True,
-    )
-    disasm_lines = objdump.stdout.splitlines()
-    # Filter to user functions (skip _start, __libc, deregister, register, etc.)
-    skip_prefixes = (
-        "_start", "_init", "_fini", "_dl_", "__do_global", "__libc_csu",
-        "deregister_tm", "register_tm", "frame_dummy", "__do_global",
-        ".plt", "<.plt",
-    )
-    filtered = []
-    include = False
-    for line in disasm_lines:
-        if line.strip().endswith(">:"):
-            func_name = line.split("<")[1].split(">")[0] if "<" in line else ""
-            include = not any(func_name.startswith(p) for p in skip_prefixes)
-        if include:
-            filtered.append(line)
-    disassembly = "\n".join(filtered)
+        checksec_out = ""
+        try:
+            checksec_out = subprocess.run(
+                ["checksec", "--file", str(binary_path)],
+                capture_output=True, text=True,
+            ).stdout.strip()
+        except FileNotFoundError:
+            checksec_out = "checksec not available"
 
-    # Strings
-    strings_out = subprocess.run(
-        ["strings", str(binary_path)], capture_output=True, text=True,
-    )
-    strings_list = [s for s in strings_out.stdout.splitlines() if len(s) > 3][:50]
-
-    # Libc version
-    libc_version = "unknown"
-    if libc:
-        libc_strings = subprocess.run(
-            ["strings", libc], capture_output=True, text=True,
+        # Get disassembly of user-defined functions
+        objdump = subprocess.run(
+            ["objdump", "-d", str(binary_path)], capture_output=True, text=True,
         )
-        for line in libc_strings.stdout.splitlines():
-            if "GNU C Library" in line:
-                libc_version = line.strip()
-                break
+        disasm_lines = objdump.stdout.splitlines()
+        # Filter to user functions (skip _start, __libc, deregister, register, etc.)
+        skip_prefixes = (
+            "_start", "_init", "_fini", "_dl_", "__do_global", "__libc_csu",
+            "deregister_tm", "register_tm", "frame_dummy", "__do_global",
+            ".plt", "<.plt",
+        )
+        filtered = []
+        include = False
+        for line in disasm_lines:
+            if line.strip().endswith(">:"):
+                func_name = line.split("<")[1].split(">")[0] if "<" in line else ""
+                include = not any(func_name.startswith(p) for p in skip_prefixes)
+            if include:
+                filtered.append(line)
+        disassembly = "\n".join(filtered)
 
-    # Architecture from file output
-    arch = "x86-64" if "x86-64" in file_out else "unknown"
+        # Strings
+        strings_out = subprocess.run(
+            ["strings", str(binary_path)], capture_output=True, text=True,
+        )
+        strings_list = [s for s in strings_out.stdout.splitlines() if len(s) > 3][:50]
+
+        # Libc version
+        libc_version = "unknown"
+        if libc:
+            libc_strings = subprocess.run(
+                ["strings", libc], capture_output=True, text=True,
+            )
+            for line in libc_strings.stdout.splitlines():
+                if "GNU C Library" in line:
+                    libc_version = line.strip()
+                    break
+
+        # Architecture from file output
+        arch = "x86-64" if "x86-64" in file_out else "unknown"
 
     console.print("[bold]Pass 1/3:[/bold] Identifying vulnerabilities...")
-    analyzer = ExploitAnalyzer(llm)
+    analyzer = ExploitAnalyzer(llm, sha256=sha256, registry=registry)
     result = analyzer.analyze(
-        name=binary_path.name,
+        name=binary_path.name if not sha256 else sha256[:12],
         architecture=arch,
         protections=checksec_out,
         libc_version=libc_version,

@@ -7,19 +7,31 @@ from typing import Any
 
 from neo4j import Driver
 
+from revgraph.agents.registry import ToolRegistry
 from revgraph.llm.client import LLMClient
-from revgraph.llm.prompts import LABEL_FUNCTION
+from revgraph.llm.prompts import AGENT_LABEL_FUNCTION
 from revgraph.utils.logging import get_logger
 
 log = get_logger(__name__)
+
+_LABEL_TOOLS = [
+    "get_function_details",
+    "get_function_strings",
+    "get_function_imports",
+    "get_function_callers",
+    "get_function_callees",
+]
 
 
 class FunctionLabeler:
     """Label functions with descriptive names using LLM analysis."""
 
-    def __init__(self, llm: LLMClient, driver: Driver) -> None:
+    def __init__(
+        self, llm: LLMClient, driver: Driver, registry: ToolRegistry | None = None,
+    ) -> None:
         self._llm = llm
         self._driver = driver
+        self._registry = registry or ToolRegistry(driver, llm)
 
     def label_functions(
         self,
@@ -30,8 +42,11 @@ class FunctionLabeler:
         functions = self._get_unlabeled_functions(sha256)
         results = []
 
+        tools = self._registry.get_tool_schemas_by_name(_LABEL_TOOLS)
+        executor = self._registry.make_tool_executor()
+
         for func in functions:
-            label_result = self._label_single(func)
+            label_result = self._label_single(func, sha256, tools, executor)
             if label_result and label_result.get("confidence", 0) >= confidence_threshold:
                 results.append(
                     {
@@ -51,23 +66,36 @@ class FunctionLabeler:
         )
         return results
 
-    def _label_single(self, func: dict[str, Any]) -> dict[str, Any] | None:
-        """Label a single function."""
-        prompt = LABEL_FUNCTION.render(
-            name=func["name"],
-            address=hex(func["address"]) if isinstance(func["address"], int) else func["address"],
-            decompiled_code=func.get("decompiled_code", ""),
-            strings=func.get("strings", []),
-            imports=func.get("imports", []),
-        )
+    def _label_single(
+        self,
+        func: dict[str, Any],
+        sha256: str,
+        tools: list[dict[str, Any]],
+        executor: Any,
+    ) -> dict[str, Any] | None:
+        """Label a single function via agentic tool loop."""
+        address = hex(func["address"]) if isinstance(func["address"], int) else func["address"]
 
-        raw = self._llm.complete(
-            messages=[{"role": "user", "content": prompt}],
+        messages = [
+            {"role": "system", "content": AGENT_LABEL_FUNCTION},
+            {
+                "role": "user",
+                "content": (
+                    f"Suggest a descriptive name for the function '{func['name']}' "
+                    f"at address {address} in binary {sha256}."
+                ),
+            },
+        ]
+
+        raw = self._llm.tool_loop(
+            messages=messages,
+            tools=tools,
+            tool_executor=executor,
             temperature=0.1,
+            max_iterations=6,
         )
 
         try:
-            # Extract JSON from response
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -81,8 +109,8 @@ class FunctionLabeler:
     ) -> None:
         """Write labels to Function nodes in Neo4j."""
         rows = [
-            {"address": l["address"], "label": l["label"]}
-            for l in labels
+            {"address": entry["address"], "label": entry["label"]}
+            for entry in labels
         ]
 
         with self._driver.session() as session:
@@ -99,19 +127,14 @@ class FunctionLabeler:
     def _get_unlabeled_functions(
         self, sha256: str
     ) -> list[dict[str, Any]]:
-        """Get functions that need labeling."""
+        """Get functions that need labeling (address + name only)."""
         with self._driver.session() as session:
             result = session.run(
                 "MATCH (f:Function {binary_sha256: $sha256}) "
                 "WHERE f.label IS NULL AND "
                 "(f.name STARTS WITH 'FUN_' OR f.name STARTS WITH 'sub_' "
                 "OR f.name STARTS WITH 'fcn.') "
-                "OPTIONAL MATCH (f)-[:REFERENCES_STRING]->(s:String) "
-                "OPTIONAL MATCH (f)-[:REFERENCES_IMPORT]->(i:Import) "
-                "RETURN f.name AS name, f.address AS address, "
-                "f.decompiled_code AS decompiled_code, "
-                "collect(DISTINCT s.value) AS strings, "
-                "collect(DISTINCT i.name) AS imports",
+                "RETURN f.name AS name, f.address AS address",
                 sha256=sha256,
             )
             return [dict(r) for r in result]

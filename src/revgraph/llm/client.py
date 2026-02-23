@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import litellm
@@ -49,9 +51,8 @@ class LLMClient:
                 os.environ[env_var] = key
 
         for name, provider_cfg in self._config.providers.items():
-            if provider_cfg.api_base:
-                if name == "ollama":
-                    os.environ.setdefault("OLLAMA_API_BASE", provider_cfg.api_base)
+            if provider_cfg.api_base and name == "ollama":
+                os.environ.setdefault("OLLAMA_API_BASE", provider_cfg.api_base)
 
     @property
     def default_model(self) -> str:
@@ -62,15 +63,15 @@ class LLMClient:
         return self._usage
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-    def complete(
+    def _call_litellm(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         **kwargs: Any,
-    ) -> str:
-        """Send a completion request through LiteLLM."""
+    ) -> Any:
+        """Low-level litellm.completion call with retry and token tracking."""
         model = model or self._config.default_model
         temperature = temperature if temperature is not None else self._config.temperature
         max_tokens = max_tokens or self._config.max_tokens
@@ -85,7 +86,6 @@ class LLMClient:
             **kwargs,
         )
 
-        content = response.choices[0].message.content or ""
         if hasattr(response, "usage") and response.usage:
             self._usage.update(
                 {
@@ -95,8 +95,106 @@ class LLMClient:
                 }
             )
 
-        log.debug("llm_response", model=model, tokens=len(content))
+        return response
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Send a completion request through LiteLLM."""
+        response = self._call_litellm(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
+        content = response.choices[0].message.content or ""
+        log.debug("llm_response", model=model or self._config.default_model, tokens=len(content))
         return content
+
+    def tool_loop(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_executor: Callable[[str, dict[str, Any]], str],
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        max_iterations: int = 15,
+    ) -> str:
+        """Run a tool-calling loop until the model stops requesting tools.
+
+        Args:
+            messages: Conversation messages (system + user).
+            tools: OpenAI-compatible tool schemas.
+            tool_executor: ``(name, args) -> str`` callable that runs a tool
+                and returns the JSON-serialised result.
+            max_iterations: Safety cap on loop iterations.
+
+        Returns:
+            The model's final text response.
+        """
+        messages = list(messages)  # don't mutate caller's list
+
+        for iteration in range(max_iterations):
+            log.debug("tool_loop_iteration", iteration=iteration)
+
+            response = self._call_litellm(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+            )
+
+            choice = response.choices[0]
+            assistant_msg = choice.message
+
+            # If no tool calls, return the text content
+            tool_calls = getattr(assistant_msg, "tool_calls", None)
+            if not tool_calls:
+                return assistant_msg.content or ""
+
+            # Append assistant message with tool calls
+            messages.append(assistant_msg.model_dump())
+
+            # Execute each tool call and append results
+            for tc in tool_calls:
+                func_name = tc.function.name
+                try:
+                    func_args = json.loads(tc.function.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    func_args = {}
+
+                log.debug("tool_call", tool=func_name, args=func_args)
+
+                try:
+                    result = tool_executor(func_name, func_args)
+                except Exception as exc:
+                    result = json.dumps({"error": str(exc)})
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    }
+                )
+
+        # Max iterations reached — get a final response without tools
+        log.warning("tool_loop_max_iterations", max_iterations=max_iterations)
+        response = self._call_litellm(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content or ""
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def embed(

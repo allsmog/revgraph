@@ -1,10 +1,135 @@
-"""Jinja2 prompt templates for LLM tasks."""
+"""Jinja2 prompt templates and plain-string agentic system prompts for LLM tasks."""
 
 from __future__ import annotations
 
 from jinja2 import Environment, BaseLoader
 
 _env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
+
+# ============================================================================
+# Agentic system prompts (plain strings — no Jinja2 / no data interpolation)
+# ============================================================================
+
+AGENT_SUMMARIZE_FUNCTION = (
+    "You are a reverse engineering expert. Your task is to summarize what a "
+    "single function does in 2-3 concise sentences.\n\n"
+    "You have tools to inspect the binary graph. Use them to fetch the "
+    "function's decompiled code, strings, imports, callers, and callees. "
+    "Then produce a clear natural-language summary."
+)
+
+AGENT_SUMMARIZE_BINARY = (
+    "You are a reverse engineering expert. Your task is to produce a "
+    "high-level summary of an entire binary.\n\n"
+    "You have tools to explore the binary graph. Start by loading the "
+    "binary metadata, then list functions (prioritize by BBR score if "
+    "available), inspect key functions, search strings, and review imports. "
+    "Produce a comprehensive but concise summary covering the binary's "
+    "purpose, architecture, notable capabilities, and any interesting "
+    "patterns."
+)
+
+AGENT_LABEL_FUNCTION = (
+    "You are a reverse engineering expert. Your task is to suggest a "
+    "descriptive function name for a function with an auto-generated name.\n\n"
+    "You have tools to inspect the function's code, strings, and imports. "
+    "Analyze them and respond with ONLY a JSON object:\n"
+    '{"label": "descriptive_function_name", "confidence": 0.0-1.0, '
+    '"reasoning": "brief explanation"}'
+)
+
+AGENT_VULN_REPORT = (
+    "You are a vulnerability researcher. Your task is to produce a "
+    "comprehensive vulnerability report for a binary.\n\n"
+    "You have tools to explore the binary graph. Start by loading binary "
+    "info and computing BBR scores. Then examine dangerous functions, "
+    "high-BBR functions, strings, and imports. For each potential "
+    "vulnerability, inspect the function's decompiled code.\n\n"
+    "Produce a report covering:\n"
+    "1. Identified vulnerabilities (with severity: critical/high/medium/low)\n"
+    "2. Dangerous API usage patterns\n"
+    "3. Potential attack vectors\n"
+    "4. Recommendations"
+)
+
+AGENT_YARA_GENERATE = (
+    "You are a malware analyst. Your task is to generate YARA rules for "
+    "detecting a binary or similar variants.\n\n"
+    "You have tools to explore the binary graph. Start by loading binary "
+    "info, then search for distinctive strings, review imports, and "
+    "examine opcode sequences in high-BBR basic blocks.\n\n"
+    "Generate well-structured YARA rules with:\n"
+    "- Descriptive rule names\n"
+    "- Appropriate meta fields\n"
+    "- String and byte pattern conditions\n"
+    "- Comments explaining each rule\n\n"
+    "Output ONLY the YARA rules (no markdown fences)."
+)
+
+AGENT_EXPLOIT_IDENTIFY = (
+    "You are a binary exploitation expert. Your task is to identify ALL "
+    "potential vulnerabilities in a binary by exploring its code via tools.\n\n"
+    "Use the provided tools to inspect functions, read decompiled code, "
+    "check imports, search strings, and navigate the call graph. Focus on:\n"
+    "- Buffer overflows (stack and heap)\n"
+    "- Off-by-one/null errors (especially scanf %%Ns into N-byte buffers)\n"
+    "- Saved frame pointer corruption (callee overwrites saved RBP → "
+    "caller's rbp-relative accesses shift)\n"
+    "- OOB reads via comparison functions (memcmp, strncmp) creating oracles\n"
+    "- Format string bugs\n"
+    "- Use-after-free\n"
+    "- Unchecked return values\n\n"
+    "For EACH vulnerability, respond with a JSON array where each entry has:\n"
+    '- "id": short identifier (e.g. "oob-read-1")\n'
+    '- "type": vulnerability class\n'
+    '- "location": function name and address\n'
+    '- "description": what the bug is\n'
+    '- "trigger": exact input to reach and trigger\n'
+    '- "constraints": what limits exploitation\n'
+    '- "read_or_write": read, write, or both\n'
+    '- "caller_impact": effect on caller if stack state is corrupted\n'
+    '- "survives": true/false — does the program continue?\n\n'
+    "Respond ONLY with the JSON array."
+)
+
+AGENT_EXPLOIT_VALIDATE = (
+    "You are a binary exploitation auditor. Your job is to DISPROVE or "
+    "CONFIRM each claimed vulnerability by re-examining the code via tools.\n\n"
+    "For EACH claimed vulnerability:\n"
+    "1. Use tools to fetch the function's code and trace the exact path\n"
+    "2. Check every validation, bounds check, and branch\n"
+    "3. Distinguish: check fails AND exits → killed vs. check fails BUT "
+    "continues → survives\n"
+    "4. For saved RBP corruption, trace caller impact\n\n"
+    "Respond with a JSON array. Each entry:\n"
+    '- "id": same id from input\n'
+    '- "confirmed": true/false\n'
+    '- "kill_reason": why it fails (null if confirmed)\n'
+    '- "primitive": what attacker gets (null if not confirmed)\n'
+    '- "caller_impact": effect on caller\'s local variables\n'
+    '- "prerequisite": requirements for exploitation\n'
+    '- "interacts_with": other vuln IDs this chains with\n\n'
+    "Be adversarial but do NOT over-kill: a failed validation that does not "
+    "halt the function is NOT a kill reason.\n"
+    "Respond ONLY with the JSON array."
+)
+
+AGENT_EXPLOIT_CHAIN = (
+    "You are a binary exploitation strategist. Given confirmed vulnerabilities "
+    "and access to the binary via tools, build a CONCRETE exploitation chain.\n\n"
+    "Use tools to re-examine code as needed. Build a plan that:\n"
+    "1. Starts from program start\n"
+    "2. Uses ONLY confirmed vulnerabilities\n"
+    "3. Specifies EXACT input sequences\n"
+    "4. Handles ASLR, PIE, NX\n"
+    "5. Ends with code execution or flag read\n\n"
+    "Respond with JSON:\n"
+    '{"feasible": true/false, "strategy": "summary", '
+    '"steps": [{"step": 1, "action": "...", "input": "...", '
+    '"effect": "...", "leaks": "..."}], '
+    '"missing_primitive": null or "description", '
+    '"exploit_skeleton": "pwntools code"}'
+)
 
 # -- NL2GQL --
 

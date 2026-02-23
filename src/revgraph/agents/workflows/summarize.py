@@ -4,6 +4,36 @@ from __future__ import annotations
 
 from revgraph.agents.base import BaseWorkflow
 
+_SYSTEM_PROMPT = (
+    "You are a reverse engineering expert. Your task is to summarize all "
+    "key functions in a binary and produce a comprehensive binary-level "
+    "summary.\n\n"
+    "Use the provided tools to:\n"
+    "1. Load binary info\n"
+    "2. Compute BBR scores to prioritize functions\n"
+    "3. List functions (start with highest-BBR ones)\n"
+    "4. For each key function, get its details, strings, and imports\n"
+    "5. Produce individual function summaries and an overall binary summary\n\n"
+    "Format your output as:\n"
+    "# Binary Summary\n"
+    "[overall summary]\n\n"
+    "# Function Summaries\n"
+    "### function_name (0xADDR)\n"
+    "[summary]\n"
+)
+
+_TOOLS = [
+    "load_binary_info",
+    "compute_bbr",
+    "list_functions",
+    "get_function_details",
+    "get_function_strings",
+    "get_function_imports",
+    "get_function_callers",
+    "get_function_callees",
+    "search_strings",
+]
+
 
 class SummarizeWorkflow(BaseWorkflow):
     name = "summarize"
@@ -13,51 +43,10 @@ class SummarizeWorkflow(BaseWorkflow):
     async def run(
         self, input_text: str, max_turns: int = 30, interactive: bool = False
     ) -> str:
-        """Summarize functions in a binary, prioritized by BBR."""
-        from revgraph.llm.summarizer import Summarizer
-        from revgraph.analysis.bbr import get_top_bbr_functions
-
-        sha256 = input_text.strip().split()[0] if input_text.strip() else ""
-        if len(sha256) != 64:
-            from revgraph.graph.query_engine import QueryEngine
-
-            engine = QueryEngine(self._driver)
-            binaries = engine.execute("MATCH (b:BinaryFile) RETURN b.sha256 AS sha256 LIMIT 1")
-            if binaries:
-                sha256 = binaries[0]["sha256"]
-            else:
-                return "No binaries found. Load a binary first."
-
-        summarizer = Summarizer(self._llm, self._driver)
-
-        # Get top functions by BBR
-        top_funcs = get_top_bbr_functions(self._driver, sha256, limit=20)
-        if not top_funcs:
-            # Fall back to first 20 functions
-            from revgraph.graph.query_engine import QueryEngine
-
-            engine = QueryEngine(self._driver)
-            top_funcs = engine.execute(
-                "MATCH (f:Function {binary_sha256: $sha256}) "
-                "RETURN f.name AS name, f.address AS address LIMIT 20",
-                params={"sha256": sha256},
-            )
-
-        summaries = []
-        for func in top_funcs:
-            result = summarizer.summarize(str(func["address"]), scope="function")
-            if not result.get("error"):
-                summaries.append(
-                    f"### {func['name']} ({hex(func['address'])})\n{result['summary']}\n"
-                )
-                # Write to graph
-                summarizer.write_summary(str(func["address"]), result["summary"])
-
-        # Generate binary-level summary
-        binary_summary = summarizer.summarize(sha256, scope="binary")
-
-        output = f"# Binary Summary\n\n{binary_summary.get('summary', '')}\n\n"
-        output += f"# Function Summaries ({len(summaries)} functions)\n\n"
-        output += "\n".join(summaries)
-
-        return output
+        """Summarize binary functions via agentic tool loop."""
+        return self._run_agent(
+            system_prompt=_SYSTEM_PROMPT,
+            user_msg=input_text,
+            tool_names=_TOOLS,
+            max_iterations=max_turns,
+        )

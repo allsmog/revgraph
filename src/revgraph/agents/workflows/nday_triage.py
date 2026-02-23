@@ -4,6 +4,36 @@ from __future__ import annotations
 
 from revgraph.agents.base import BaseWorkflow
 
+_SYSTEM_PROMPT = (
+    "You are an N-day vulnerability triage specialist. Your task is to "
+    "analyze a binary for potential N-day vulnerabilities and produce a "
+    "prioritized triage report.\n\n"
+    "Use the provided tools to:\n"
+    "1. Load binary info and compute BBR scores\n"
+    "2. Find dangerous functions (dangerous API usage)\n"
+    "3. Examine high-BBR functions for vulnerability patterns\n"
+    "4. Inspect decompiled code of suspicious functions\n\n"
+    "Produce a prioritized triage report with:\n"
+    "1. Critical findings (immediate attention)\n"
+    "2. High-priority findings\n"
+    "3. Medium-priority findings\n"
+    "4. Recommendations"
+)
+
+_TOOLS = [
+    "load_binary_info",
+    "compute_bbr",
+    "get_dangerous_functions",
+    "list_functions",
+    "get_function_details",
+    "get_function_strings",
+    "get_function_imports",
+    "get_function_callers",
+    "get_function_callees",
+    "search_strings",
+    "search_functions",
+]
+
 
 class NdayTriageWorkflow(BaseWorkflow):
     name = "nday-triage"
@@ -13,63 +43,10 @@ class NdayTriageWorkflow(BaseWorkflow):
     async def run(
         self, input_text: str, max_turns: int = 30, interactive: bool = False
     ) -> str:
-        """Triage N-day vulnerabilities in a binary."""
-        from revgraph.analysis.vulnerability import vulnerability_surface
-        from revgraph.analysis.bbr import get_top_bbr_functions
-
-        # Extract SHA256 from input
-        sha256 = input_text.strip().split()[0] if input_text.strip() else ""
-        if len(sha256) != 64:
-            # Try to find it
-            from revgraph.graph.query_engine import QueryEngine
-
-            engine = QueryEngine(self._driver)
-            binaries = engine.execute("MATCH (b:BinaryFile) RETURN b.sha256 AS sha256 LIMIT 1")
-            if binaries:
-                sha256 = binaries[0]["sha256"]
-            else:
-                return "No binaries found in graph. Load a binary first."
-
-        # Step 1: Vulnerability surface analysis
-        surface = vulnerability_surface(self._driver, sha256)
-
-        # Step 2: BBR ranking
-        top_funcs = get_top_bbr_functions(self._driver, sha256, limit=20)
-
-        # Step 3: Combine and triage
-        triage_data = (
-            f"Binary: {sha256[:12]}...\n"
-            f"Total dangerous functions: {surface['total_dangerous_functions']}\n"
-            f"API usage: {surface['api_usage']}\n\n"
-            f"High-risk functions (dangerous + high BBR):\n"
+        """Triage N-day vulnerabilities via agentic tool loop."""
+        return self._run_agent(
+            system_prompt=_SYSTEM_PROMPT,
+            user_msg=input_text,
+            tool_names=_TOOLS,
+            max_iterations=max_turns,
         )
-        for func in surface.get("high_risk_functions", [])[:10]:
-            triage_data += (
-                f"  - {func['function_name']} @ {hex(func['address'])}: "
-                f"APIs={func['dangerous_imports']}, BBR={func.get('max_bbr', 'N/A')}\n"
-            )
-
-        triage_data += f"\nTop BBR functions:\n"
-        for func in top_funcs[:10]:
-            triage_data += f"  - {func['name']} @ {hex(func['address'])}: BBR={func['max_bbr']:.6f}\n"
-
-        # Step 4: LLM triage report
-        report = self._llm.complete(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an N-day vulnerability triage specialist. "
-                        "Analyze the findings and produce a prioritized triage report with: "
-                        "1. Critical findings (immediate attention) "
-                        "2. High-priority findings "
-                        "3. Medium-priority findings "
-                        "4. Recommendations"
-                    ),
-                },
-                {"role": "user", "content": triage_data},
-            ],
-            max_tokens=4096,
-        )
-
-        return report

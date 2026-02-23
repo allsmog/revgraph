@@ -1,13 +1,11 @@
-"""AgentTeamFactory — create AutoGen team compositions for workflows."""
+"""AgentTeamFactory — create tool-loop team compositions for workflows."""
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from neo4j import Driver
 
-from revgraph.agents.base import BaseWorkflow
 from revgraph.agents.registry import ToolRegistry
 from revgraph.config.models import RevGraphConfig
 from revgraph.llm.client import LLMClient
@@ -106,7 +104,7 @@ AGENT_PROMPTS: dict[str, str] = {
 
 
 class _SimpleTeam:
-    """Simplified agent team that works without AutoGen for basic workflows."""
+    """Agent team that uses a single tool-calling loop with combined prompts."""
 
     def __init__(
         self,
@@ -126,71 +124,35 @@ class _SimpleTeam:
     async def run(
         self, input_text: str, max_turns: int = 30, interactive: bool = False
     ) -> str:
-        """Run the workflow using sequential agent steps."""
-        # Try AutoGen first
-        try:
-            return await self._run_autogen(input_text, max_turns)
-        except ImportError:
-            log.info("autogen_not_available, using simple sequential execution")
-            return await self._run_simple(input_text, max_turns)
+        """Run the workflow using a single-agent tool loop with combined system prompt."""
+        # Build a combined system prompt from all agent roles
+        role_descriptions = []
+        for agent_name in self._agents:
+            prompt = AGENT_PROMPTS.get(agent_name, f"You are {agent_name}.")
+            role_descriptions.append(f"**{agent_name}**: {prompt}")
 
-    async def _run_autogen(self, input_text: str, max_turns: int) -> str:
-        """Run using AutoGen SelectorGroupChat."""
-        from autogen_agentchat.agents import AssistantAgent
-        from autogen_agentchat.teams import SelectorGroupChat
-        from autogen_agentchat.conditions import MaxMessageTermination
-        from autogen_ext.models.openai import OpenAIChatCompletionClient
-
-        model_client = OpenAIChatCompletionClient(
-            model=self._llm.default_model,
-            api_key="placeholder",  # LiteLLM handles auth
+        system_prompt = (
+            f"You are a multi-capability agent for the '{self._workflow_name}' workflow. "
+            f"You combine the following expert roles:\n\n"
+            + "\n".join(role_descriptions)
+            + "\n\nUse the provided tools to explore the binary graph and "
+            "produce a comprehensive result."
         )
 
-        agents = []
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": input_text},
+        ]
+
         tools = self._registry.get_tool_schemas()
+        executor = self._registry.make_tool_executor()
 
-        for agent_name in self._agents:
-            system_prompt = AGENT_PROMPTS.get(agent_name, f"You are {agent_name}.")
-            agent = AssistantAgent(
-                name=agent_name,
-                system_message=system_prompt,
-                model_client=model_client,
-            )
-            agents.append(agent)
-
-        termination = MaxMessageTermination(max_messages=max_turns)
-        team = SelectorGroupChat(
-            agents,
-            model_client=model_client,
-            termination_condition=termination,
+        return self._llm.tool_loop(
+            messages=messages,
+            tools=tools,
+            tool_executor=executor,
+            max_iterations=max_turns,
         )
-
-        result = await team.run(task=input_text)
-        messages = [msg for msg in result.messages if hasattr(msg, 'content')]
-        return messages[-1].content if messages else "No output"
-
-    async def _run_simple(self, input_text: str, max_turns: int) -> str:
-        """Fallback: run agents sequentially using direct LLM calls."""
-        context = f"Task: {input_text}\n\n"
-        outputs = []
-
-        for agent_name in self._agents:
-            system_prompt = AGENT_PROMPTS.get(agent_name, f"You are {agent_name}.")
-
-            # Build agent prompt with available tools
-            tool_list = "\n".join(
-                f"- {t.name}: {t.description}" for t in self._registry.list_tools()
-            )
-
-            messages = [
-                {"role": "system", "content": f"{system_prompt}\n\nAvailable tools:\n{tool_list}"},
-                {"role": "user", "content": f"{context}\n\nPrevious findings:\n{''.join(outputs)}"},
-            ]
-
-            response = self._llm.complete(messages=messages, max_tokens=4096)
-            outputs.append(f"\n--- {agent_name} ---\n{response}\n")
-
-        return "".join(outputs)
 
 
 class AgentTeamFactory:
