@@ -1,0 +1,29 @@
+neo4j:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "${NEO4J_PASSWORD}"
+
+llm:
+  default_provider: "anthropic"
+  default_model: "claude-sonnet-4-20250514"
+  api_keys:
+    anthropic: "${ANTHROPIC_API_KEY}"
+    # openai: "${OPENAI_API_KEY}"
+    # google: "${GOOGLE_API_KEY}"
+  temperature: 0.1
+  providers:
+    ollama:
+      api_base: "http://localhost:11434"
+
+embeddings:
+  default_model: "text-embedding-3-large"
+  dimensions: 3072
+
+analysis:
+  bbr:
+    iterations: 20
+    damping_factor: 0.85
+
+agents:
+  team_type: "selector"
+  max_turns: 30

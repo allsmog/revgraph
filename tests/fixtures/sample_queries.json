@@ -1,0 +1,27 @@
+[
+  {
+    "natural_language": "List all binaries",
+    "expected_cypher_contains": "BinaryFile",
+    "category": "binary"
+  },
+  {
+    "natural_language": "What functions call malloc?",
+    "expected_cypher_contains": "malloc",
+    "category": "import"
+  },
+  {
+    "natural_language": "Find functions that reference the string 'password'",
+    "expected_cypher_contains": "password",
+    "category": "string"
+  },
+  {
+    "natural_language": "Show the top 10 most important basic blocks",
+    "expected_cypher_contains": "bbr_score",
+    "category": "bbr"
+  },
+  {
+    "natural_language": "Which functions have the most callers?",
+    "expected_cypher_contains": "CALLS",
+    "category": "callgraph"
+  }
+]
