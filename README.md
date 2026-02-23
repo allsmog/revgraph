@@ -1,4 +1,4 @@
-<img src="revgraph.png" alt="RevGraph" width="200" align="left">
+<img src="revgraph.png" alt="RevGraph" width="200">
 
 # RevGraph
 
